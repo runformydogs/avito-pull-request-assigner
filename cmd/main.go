@@ -18,7 +18,7 @@ func main() {
 	log := setupLogger(cfg.Env)
 	log = log.With(slog.String("env", cfg.Env))
 
-	log.Info("initializing server", slog.String("address", cfg.Address)) // Помимо сообщения выведем параметр с адресом
+	log.Info("initializing server", slog.String("address", cfg.Server.Port))
 	log.Debug("logger debug mode enabled")
 }
 
