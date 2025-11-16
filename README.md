@@ -62,5 +62,5 @@ docker-compose up --build
 Сервис доступен по адресу:
 
 ```
-http://localhost
+http://localhost:8080
 ```
