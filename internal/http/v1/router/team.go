@@ -20,6 +20,7 @@ func (tr *TeamRouter) SetupRoutes(r chi.Router) {
 
 	r.Route("/team", func(r chi.Router) {
 		r.Post("/add", tr.handler.CreateTeam)
+		r.Post("/deactivate", tr.handler.DeactivateTeamUsers)
 
 		r.Get("/get", tr.handler.GetTeam)
 	})

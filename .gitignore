@@ -4,3 +4,6 @@
 
 # IDE
 .idea/
+
+# Docker
+postgres-init/

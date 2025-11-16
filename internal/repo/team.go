@@ -141,6 +141,28 @@ func (r *TeamRepo) GetTeamWithMembers(teamName string) (*models.Team, error) {
 	return team, nil
 }
 
+func (r *TeamRepo) DeactivateTeamUsers(teamName string) (int, error) {
+	const op = "repo.team.DeactivateTeamUsers"
+
+	query := `
+        UPDATE users 
+        SET is_active = false 
+        WHERE team_name = $1 AND is_active = true
+    `
+
+	result, err := r.storage.Exec(query, teamName)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", op, err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", op, err)
+	}
+
+	return int(rowsAffected), nil
+}
+
 func isDuplicateKeyError(err error) bool {
 	if err.Error() == "pq: duplicate key value violates unique constraint" {
 		return true

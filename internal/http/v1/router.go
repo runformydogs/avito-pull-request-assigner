@@ -3,7 +3,7 @@ package v1
 import (
 	"github.com/go-chi/chi/v5"
 	"log/slog"
-	router2 "pull-request-assigner/internal/http/v1/router"
+	"pull-request-assigner/internal/http/v1/router"
 	"pull-request-assigner/internal/service"
 )
 
@@ -15,13 +15,15 @@ type RouterDependencies struct {
 	TeamService        *service.TeamService
 	UserService        *service.UserService
 	PullRequestService *service.PullRequestService
+	StatsService       *service.StatsService
 }
 
 func SetupRoutes(r chi.Router, deps *RouterDependencies, log *slog.Logger) {
 	routers := []Router{
-		router2.NewTeamRouter(deps.TeamService, log),
-		router2.NewUserRouter(deps.UserService, log),
-		router2.NewPullRequestRouter(deps.PullRequestService, log),
+		router.NewTeamRouter(deps.TeamService, log),
+		router.NewUserRouter(deps.UserService, log),
+		router.NewPullRequestRouter(deps.PullRequestService, log),
+		router.NewStatsRouter(deps.StatsService, log),
 	}
 
 	for _, serviceRouter := range routers {

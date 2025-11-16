@@ -36,6 +36,11 @@ type (
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	}
+
+	DeactivateTeamUsersResponse struct {
+		TeamName         string `json:"team_name"`
+		DeactivatedUsers int    `json:"deactivated_users"`
+	}
 )
 
 type TeamHandler struct {
@@ -158,6 +163,47 @@ func (h *TeamHandler) GetTeam(w http.ResponseWriter, r *http.Request) {
 
 	h.writeJSON(w, http.StatusOK, response)
 	log.Info("team retrieved successfully")
+}
+
+func (h *TeamHandler) DeactivateTeamUsers(w http.ResponseWriter, r *http.Request) {
+	const op = "handler.team.DeactivateTeamUsers"
+
+	log := h.log.With(
+		slog.String("op", op),
+	)
+
+	// Получаем team_name из query параметров (как в GetTeam)
+	teamName := r.URL.Query().Get("team_name")
+	if teamName == "" {
+		log.Error("team_name is required")
+		h.writeErrorResponse(w, http.StatusBadRequest, "TEAM_NAME_REQUIRED", "team_name query parameter is required")
+		return
+	}
+
+	deactivatedCount, err := h.teamService.DeactivateTeamUsers(r.Context(), teamName)
+	if err != nil {
+		log.Error("failed to deactivate team users", sl.Err(err))
+
+		switch {
+		case errors.Is(err, apperrors.ErrTeamNotFound):
+			h.writeErrorResponse(w, http.StatusNotFound, "NOT_FOUND", "resource not found")
+		case errors.Is(err, apperrors.ErrTeamNameRequired):
+			h.writeErrorResponse(w, http.StatusBadRequest, "TEAM_NAME_REQUIRED", "team_name is required")
+		default:
+			h.writeErrorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to deactivate team users")
+		}
+		return
+	}
+
+	response := DeactivateTeamUsersResponse{
+		TeamName:         teamName,
+		DeactivatedUsers: deactivatedCount,
+	}
+
+	h.writeJSON(w, http.StatusOK, response)
+	log.Info("team users deactivated successfully",
+		slog.String("team_name", teamName),
+		slog.Int("deactivated_count", deactivatedCount))
 }
 
 func (h *TeamHandler) writeJSON(w http.ResponseWriter, status int, data interface{}) {

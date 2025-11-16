@@ -32,15 +32,18 @@ func MustNew(log *slog.Logger) *App {
 	userRepo := repo.NewUserRepo(storage.GetDB())
 	teamRepo := repo.NewTeamRepo(storage.GetDB())
 	pullRequestRepo := repo.NewPullRequestRepo(storage.GetDB())
+	statsRepo := repo.NewStatsRepo(storage.GetDB())
 
 	userService := service.NewUserService(log, userRepo)
 	teamService := service.NewTeamService(log, teamRepo)
 	pullRequestService := service.NewPullRequestService(log, pullRequestRepo, teamRepo)
+	statsService := service.NewStatsService(log, statsRepo)
 
 	routerDependencies := v1.RouterDependencies{
 		UserService:        userService,
 		TeamService:        teamService,
 		PullRequestService: pullRequestService,
+		StatsService:       statsService,
 	}
 
 	restApp := rest.New(

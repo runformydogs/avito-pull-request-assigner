@@ -20,6 +20,7 @@ type TeamProvider interface {
 	TeamExists(teamName string) (bool, error)
 	AddTeamMembers(teamName string, members []models.User) error
 	GetTeamWithMembers(teamName string) (*models.Team, error)
+	DeactivateTeamUsers(teamName string) (int, error)
 }
 
 func NewTeamService(
@@ -124,4 +125,42 @@ func (s *TeamService) GetTeamWithMembers(ctx context.Context, teamName string) (
 		slog.Int("member_count", len(team.Members)))
 
 	return team, nil
+}
+
+func (s *TeamService) DeactivateTeamUsers(ctx context.Context, teamName string) (int, error) {
+	const op = "service.team.DeactivateTeamUsers"
+
+	log := s.log.With(
+		slog.String("op", op),
+		slog.String("team_name", teamName),
+	)
+
+	log.Info("attempting to deactivate team users")
+
+	if teamName == "" {
+		log.Error("team name is required")
+		return 0, apperrors.ErrTeamNameRequired
+	}
+
+	exists, err := s.teamRepo.TeamExists(teamName)
+	if err != nil {
+		log.Error("failed to check team existence", sl.Err(err))
+		return 0, fmt.Errorf("%s: %w", op, err)
+	}
+
+	if !exists {
+		log.Warn("team not found", slog.String("team_name", teamName))
+		return 0, apperrors.ErrTeamNotFound
+	}
+
+	deactivatedCount, err := s.teamRepo.DeactivateTeamUsers(teamName)
+	if err != nil {
+		log.Error("failed to deactivate team users", sl.Err(err))
+		return 0, fmt.Errorf("%s: %w", op, err)
+	}
+
+	log.Info("team users deactivated successfully",
+		slog.Int("deactivated_count", deactivatedCount))
+
+	return deactivatedCount, nil
 }
