@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"pull-request-assigner/internal/apperrors"
 	"pull-request-assigner/internal/domain/models"
 	"pull-request-assigner/internal/lib/logger/sl"
 )
@@ -41,12 +43,21 @@ func (s *TeamService) CreateTeamWithMembers(ctx context.Context, team models.Tea
 
 	if team.TeamName == "" {
 		log.Error("team name is required")
-		return nil, fmt.Errorf("%s: team name is required", op)
+		return nil, apperrors.ErrTeamNameRequired
 	}
 
 	if len(team.Members) == 0 {
 		log.Error("team must have at least one member")
-		return nil, fmt.Errorf("%s: team must have at least one member", op)
+		return nil, apperrors.ErrMembersRequired
+	}
+
+	for i, member := range team.Members {
+		if member.UserID == "" {
+			return nil, fmt.Errorf("%s: user_id is required for member at index %d", op, i)
+		}
+		if member.Username == "" {
+			return nil, fmt.Errorf("%s: username is required for member at index %d", op, i)
+		}
 	}
 
 	exists, err := s.teamRepo.TeamExists(team.TeamName)
@@ -56,8 +67,8 @@ func (s *TeamService) CreateTeamWithMembers(ctx context.Context, team models.Tea
 	}
 
 	if exists {
-		log.Warn("team already exists")
-		return nil, fmt.Errorf("%s: team %s already exists", op, team.TeamName)
+		log.Warn("team already exists", slog.String("team_name", team.TeamName))
+		return nil, apperrors.ErrTeamExists
 	}
 
 	err = s.teamRepo.CreateTeam(team.TeamName)
@@ -96,11 +107,15 @@ func (s *TeamService) GetTeamWithMembers(ctx context.Context, teamName string) (
 
 	if teamName == "" {
 		log.Error("team name is required")
-		return nil, fmt.Errorf("%s: team name is required", op)
+		return nil, apperrors.ErrTeamNameRequired
 	}
 
 	team, err := s.teamRepo.GetTeamWithMembers(teamName)
 	if err != nil {
+		if errors.Is(err, apperrors.ErrTeamNotFound) {
+			log.Warn("team not found", slog.String("team_name", teamName))
+			return nil, apperrors.ErrTeamNotFound
+		}
 		log.Error("failed to get team", sl.Err(err))
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}

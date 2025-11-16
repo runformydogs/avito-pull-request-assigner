@@ -1,33 +1,36 @@
 package handler
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"pull-request-assigner/internal/apperrors"
 	"pull-request-assigner/internal/domain/models"
 	"pull-request-assigner/internal/lib/logger/sl"
 	"pull-request-assigner/internal/service"
+	"time"
 )
 
 type (
-	CreatePullRequestRequest struct {
+	CreatePRRequest struct {
 		PullRequestID   string `json:"pull_request_id"`
 		PullRequestName string `json:"pull_request_name"`
 		AuthorID        string `json:"author_id"`
 	}
 
-	CreatePullRequestResponse struct {
-		PR                models.PullRequest `json:"pr"`
-		AssignedReviewers []string           `json:"assigned_reviewers"`
+	CreatePRResponse struct {
+		PR *PullRequestWithReviewers `json:"pr"`
 	}
 
-	MergePullRequestRequest struct {
+	MergePRRequest struct {
 		PullRequestID string `json:"pull_request_id"`
 	}
 
-	MergePullRequestResponse struct {
-		PR models.PullRequest `json:"pr"`
+	MergePRResponse struct {
+		PR *PullRequestWithReviewers `json:"pr"`
 	}
 
 	ReassignReviewerRequest struct {
@@ -36,8 +39,26 @@ type (
 	}
 
 	ReassignReviewerResponse struct {
-		PR         models.PullRequest `json:"pr"`
-		ReplacedBy string             `json:"replaced_by"`
+		PR         *PullRequestWithReviewers `json:"pr"`
+		ReplacedBy string                    `json:"replaced_by"`
+	}
+
+	PullRequestWithReviewers struct {
+		PullRequestID     string   `json:"pull_request_id"`
+		PullRequestName   string   `json:"pull_request_name"`
+		AuthorID          string   `json:"author_id"`
+		Status            string   `json:"status"`
+		AssignedReviewers []string `json:"assigned_reviewers"`
+		MergedAt          string   `json:"mergedAt,omitempty"`
+	}
+
+	PRErrorResponse struct {
+		Error PRErrorDetail `json:"error"`
+	}
+
+	PRErrorDetail struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
 	}
 )
 
@@ -53,34 +74,34 @@ func NewPullRequestHandler(prService *service.PullRequestService, log *slog.Logg
 	}
 }
 
-func (h *PullRequestHandler) CreatePullRequest(w http.ResponseWriter, r *http.Request) {
-	const op = "handler.pullRequest.CreatePullRequest"
+func (h *PullRequestHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
+	const op = "handler.pullRequest.CreatePR"
 
-	log := h.log.With(
-		slog.String("op", op),
-	)
+	log := h.log.With(slog.String("op", op))
 
-	var req CreatePullRequestRequest
+	var req CreatePRRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Error("invalid request body", sl.Err(err))
-		h.writeError(w, http.StatusBadRequest, "invalid request body", err)
+		h.writeErrorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid request body")
 		return
 	}
 
 	if req.PullRequestID == "" {
 		log.Error("pull_request_id is required")
-		h.writeError(w, http.StatusBadRequest, "pull_request_id is required", nil)
+		h.writeErrorResponse(w, http.StatusBadRequest, "PR_ID_REQUIRED", "pull_request_id is required")
 		return
 	}
+
 	if req.PullRequestName == "" {
 		log.Error("pull_request_name is required")
-		h.writeError(w, http.StatusBadRequest, "pull_request_name is required", nil)
+		h.writeErrorResponse(w, http.StatusBadRequest, "PR_NAME_REQUIRED", "pull_request_name is required")
 		return
 	}
+
 	if req.AuthorID == "" {
 		log.Error("author_id is required")
-		h.writeError(w, http.StatusBadRequest, "author_id is required", nil)
+		h.writeErrorResponse(w, http.StatusBadRequest, "AUTHOR_REQUIRED", "author_id is required")
 		return
 	}
 
@@ -90,109 +111,142 @@ func (h *PullRequestHandler) CreatePullRequest(w http.ResponseWriter, r *http.Re
 		AuthorID:        req.AuthorID,
 	}
 
-	response, err := h.prService.CreatePullRequest(r.Context(), pr)
+	createdPR, reviewers, err := h.prService.CreatePRWithReviewers(r.Context(), pr)
 	if err != nil {
-		log.Error("failed to create pull request", sl.Err(err))
+		log.Error("failed to create PR", sl.Err(err))
 
-		switch err.Error() {
-		case fmt.Sprintf("%s: PR already exists", op):
-			h.writeError(w, http.StatusConflict, "PR id already exists", err)
-		case fmt.Sprintf("%s: author/team not found", op):
-			h.writeError(w, http.StatusNotFound, "author/team not found", err)
+		switch {
+		case errors.Is(err, apperrors.ErrPRExists):
+			h.writeErrorResponse(w, http.StatusConflict, "PR_EXISTS",
+				fmt.Sprintf("PR %s already exists", req.PullRequestID))
+		case errors.Is(err, apperrors.ErrPRAuthorNotFound):
+			h.writeErrorResponse(w, http.StatusNotFound, "NOT_FOUND", "resource not found")
+		case errors.Is(err, apperrors.ErrPRTeamNotFound):
+			h.writeErrorResponse(w, http.StatusNotFound, "TEAM_NOT_FOUND", "author team not found")
+		case errors.Is(err, apperrors.ErrNoReviewerCandidates):
+			h.writeErrorResponse(w, http.StatusNotFound, "NO_REVIEWERS", "no active reviewers available in team")
 		default:
-			h.writeError(w, http.StatusInternalServerError, "failed to create pull request", err)
+			h.writeErrorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create PR")
 		}
 		return
 	}
 
+	response := CreatePRResponse{
+		PR: &PullRequestWithReviewers{
+			PullRequestID:     createdPR.PullRequestId,
+			PullRequestName:   createdPR.PullRequestName,
+			AuthorID:          createdPR.AuthorID,
+			Status:            createdPR.Status,
+			AssignedReviewers: reviewers,
+			MergedAt:          formatMergedAt(createdPR.MergedAt),
+		},
+	}
+
 	h.writeJSON(w, http.StatusCreated, response)
-	log.Info("pull request created successfully")
+	log.Info("PR created successfully")
 }
 
-func (h *PullRequestHandler) MergePullRequest(w http.ResponseWriter, r *http.Request) {
-	const op = "handler.pullRequest.MergePullRequest"
+func (h *PullRequestHandler) MergePR(w http.ResponseWriter, r *http.Request) {
+	const op = "handler.pullRequest.MergePR"
 
-	log := h.log.With(
-		slog.String("op", op),
-	)
+	log := h.log.With(slog.String("op", op))
 
-	var req MergePullRequestRequest
+	var req MergePRRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Error("invalid request body", sl.Err(err))
-		h.writeError(w, http.StatusBadRequest, "invalid request body", err)
+		h.writeErrorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid request body")
 		return
 	}
 
 	if req.PullRequestID == "" {
 		log.Error("pull_request_id is required")
-		h.writeError(w, http.StatusBadRequest, "pull_request_id is required", nil)
+		h.writeErrorResponse(w, http.StatusBadRequest, "PR_ID_REQUIRED", "pull_request_id is required")
 		return
 	}
 
-	pr, err := h.prService.MergePullRequest(r.Context(), req.PullRequestID)
+	mergedPR, reviewers, err := h.prService.MergePR(r.Context(), req.PullRequestID)
 	if err != nil {
-		log.Error("failed to merge pull request", sl.Err(err))
+		log.Error("failed to merge PR", sl.Err(err))
 
-		if err.Error() == fmt.Sprintf("%s: PR not found", op) {
-			h.writeError(w, http.StatusNotFound, "PR not found", err)
-		} else {
-			h.writeError(w, http.StatusInternalServerError, "failed to merge pull request", err)
+		switch {
+		case errors.Is(err, apperrors.ErrPRNotFound):
+			h.writeErrorResponse(w, http.StatusNotFound, "NOT_FOUND", "resource not found")
+		default:
+			h.writeErrorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to merge PR")
 		}
 		return
 	}
 
-	response := MergePullRequestResponse{
-		PR: *pr,
+	response := MergePRResponse{
+		PR: &PullRequestWithReviewers{
+			PullRequestID:     mergedPR.PullRequestId,
+			PullRequestName:   mergedPR.PullRequestName,
+			AuthorID:          mergedPR.AuthorID,
+			Status:            mergedPR.Status,
+			AssignedReviewers: reviewers,
+			MergedAt:          formatMergedAt(mergedPR.MergedAt),
+		},
 	}
 
 	h.writeJSON(w, http.StatusOK, response)
-	log.Info("pull request merged successfully")
+	log.Info("PR merged successfully")
 }
 
 func (h *PullRequestHandler) ReassignReviewer(w http.ResponseWriter, r *http.Request) {
 	const op = "handler.pullRequest.ReassignReviewer"
 
-	log := h.log.With(
-		slog.String("op", op),
-	)
+	log := h.log.With(slog.String("op", op))
 
 	var req ReassignReviewerRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Error("invalid request body", sl.Err(err))
-		h.writeError(w, http.StatusBadRequest, "invalid request body", err)
+		h.writeErrorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid request body")
 		return
 	}
 
 	if req.PullRequestID == "" {
 		log.Error("pull_request_id is required")
-		h.writeError(w, http.StatusBadRequest, "pull_request_id is required", nil)
-		return
-	}
-	if req.OldReviewerID == "" {
-		log.Error("old_reviewer_id is required")
-		h.writeError(w, http.StatusBadRequest, "old_reviewer_id is required", nil)
+		h.writeErrorResponse(w, http.StatusNotFound, "NOT_FOUND", "resource not found")
 		return
 	}
 
-	response, err := h.prService.ReassignReviewer(r.Context(), req.PullRequestID, req.OldReviewerID)
+	if req.OldReviewerID == "" {
+		log.Error("old_reviewer_id is required")
+		h.writeErrorResponse(w, http.StatusNotFound, "NOT_FOUND", "resource not found")
+		return
+	}
+
+	updatedPR, reviewers, newReviewer, err := h.prService.ReassignReviewer(r.Context(), req.PullRequestID, req.OldReviewerID)
 	if err != nil {
 		log.Error("failed to reassign reviewer", sl.Err(err))
 
-		switch err.Error() {
-		case fmt.Sprintf("%s: PR not found", op):
-			h.writeError(w, http.StatusNotFound, "PR not found", err)
-		case fmt.Sprintf("%s: cannot reassign on merged PR", op):
-			h.writeError(w, http.StatusConflict, "cannot reassign on merged PR", err)
-		case fmt.Sprintf("%s: reviewer is not assigned to this PR", op):
-			h.writeError(w, http.StatusConflict, "reviewer is not assigned to this PR", err)
-		case fmt.Sprintf("%s: no active replacement candidate in team", op):
-			h.writeError(w, http.StatusConflict, "no active replacement candidate in team", err)
+		switch {
+		case errors.Is(err, apperrors.ErrPRNotFound):
+			h.writeErrorResponse(w, http.StatusNotFound, "NOT_FOUND", "resource not found")
+		case errors.Is(err, apperrors.ErrPRAlreadyMerged):
+			h.writeErrorResponse(w, http.StatusConflict, "PR_MERGED", "cannot reassign on merged PR")
+		case errors.Is(err, apperrors.ErrReviewerNotAssigned):
+			h.writeErrorResponse(w, http.StatusNotFound, "NOT_FOUND", "resource not found")
+		case errors.Is(err, apperrors.ErrNoReviewerCandidates):
+			h.writeErrorResponse(w, http.StatusConflict, "NO_CANDIDATE", "no active replacement candidate in team")
 		default:
-			h.writeError(w, http.StatusInternalServerError, "failed to reassign reviewer", err)
+			h.writeErrorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to reassign reviewer")
 		}
 		return
+	}
+
+	response := ReassignReviewerResponse{
+		PR: &PullRequestWithReviewers{
+			PullRequestID:     updatedPR.PullRequestId,
+			PullRequestName:   updatedPR.PullRequestName,
+			AuthorID:          updatedPR.AuthorID,
+			Status:            updatedPR.Status,
+			AssignedReviewers: reviewers,
+			MergedAt:          formatMergedAt(updatedPR.MergedAt),
+		},
+		ReplacedBy: newReviewer,
 	}
 
 	h.writeJSON(w, http.StatusOK, response)
@@ -203,22 +257,29 @@ func (h *PullRequestHandler) writeJSON(w http.ResponseWriter, status int, data i
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		fmt.Printf("Error encoding JSON response: %v\n", err)
+		h.log.Error("failed to encode JSON response", sl.Err(err))
 	}
 }
 
-func (h *PullRequestHandler) writeError(w http.ResponseWriter, status int, message string, err error) {
+func (h *PullRequestHandler) writeErrorResponse(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 
-	errorResp := ErrorResponse{
-		Error: message,
-	}
-	if err != nil {
-		errorResp.Details = err.Error()
+	errorResp := PRErrorResponse{
+		Error: PRErrorDetail{
+			Code:    code,
+			Message: message,
+		},
 	}
 
 	if err := json.NewEncoder(w).Encode(errorResp); err != nil {
-		fmt.Printf("Error encoding error response: %v\n", err)
+		h.log.Error("failed to encode error response", sl.Err(err))
 	}
+}
+
+func formatMergedAt(mergedAt sql.NullTime) string {
+	if mergedAt.Valid {
+		return mergedAt.Time.Format(time.RFC3339)
+	}
+	return ""
 }

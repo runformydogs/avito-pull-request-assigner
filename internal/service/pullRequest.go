@@ -2,53 +2,47 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"pull-request-assigner/internal/apperrors"
 	"pull-request-assigner/internal/domain/models"
 	"pull-request-assigner/internal/lib/logger/sl"
 	"time"
 )
 
 type PullRequestService struct {
-	log    *slog.Logger
-	prRepo PullRequestProvider
+	log      *slog.Logger
+	prRepo   PullRequestProvider
+	teamRepo TeamProvider
 }
 
 type PullRequestProvider interface {
-	CreatePullRequest(pr models.PullRequest, reviewers []string) error
-	GetPullRequest(prID string) (*models.PullRequest, error)
+	CreatePR(pr models.PullRequest) error
 	PRExists(prID string) (bool, error)
-	MergePullRequest(prID string) (*models.PullRequest, error)
-	GetAssignedReviewers(prID string) ([]string, error)
-	GetTeamMembers(teamName string) ([]models.User, error)
+	GetPR(prID string) (*models.PullRequest, error)
+	GetPRWithReviewers(prID string) (*models.PullRequest, []string, error)
+	AddPRReviewers(prID string, reviewerIDs []string) error
+	MergePR(prID string) error
 	GetAuthorTeam(authorID string) (string, error)
-	ReassignReviewer(prID string, oldReviewerID string, newReviewerID string) error
+	GetActiveTeamMembers(teamName string, excludeUserIDs []string) ([]string, error)
+	ReplaceReviewer(prID string, oldReviewerID string, newReviewerID string) error
 }
 
 func NewPullRequestService(
 	log *slog.Logger,
-	prRepo PullRequestProvider) *PullRequestService {
+	prRepo PullRequestProvider,
+	teamRepo TeamProvider) *PullRequestService {
 	return &PullRequestService{
-		log:    log,
-		prRepo: prRepo,
+		log:      log,
+		prRepo:   prRepo,
+		teamRepo: teamRepo,
 	}
 }
 
-type (
-	CreatePullRequestResponse struct {
-		PR                models.PullRequest `json:"pr"`
-		AssignedReviewers []string           `json:"assigned_reviewers"`
-	}
-
-	ReassignReviewerResponse struct {
-		PR         models.PullRequest `json:"pr"`
-		ReplacedBy string             `json:"replaced_by"`
-	}
-)
-
-func (s *PullRequestService) CreatePullRequest(ctx context.Context, pr models.PullRequest) (*CreatePullRequestResponse, error) {
-	const op = "service.pullRequest.CreatePullRequest"
+func (s *PullRequestService) CreatePRWithReviewers(ctx context.Context, pr models.PullRequest) (*models.PullRequest, []string, error) {
+	const op = "service.pullRequest.CreatePRWithReviewers"
 
 	log := s.log.With(
 		slog.String("op", op),
@@ -56,98 +50,122 @@ func (s *PullRequestService) CreatePullRequest(ctx context.Context, pr models.Pu
 		slog.String("author_id", pr.AuthorID),
 	)
 
-	log.Info("attempting to create pull request")
+	log.Info("attempting to create PR with reviewers")
+
+	if pr.PullRequestId == "" {
+		log.Error("pull request id is required")
+		return nil, nil, apperrors.ErrPRIDRequired
+	}
+
+	if pr.PullRequestName == "" {
+		log.Error("pull request name is required")
+		return nil, nil, apperrors.ErrPRNameRequired
+	}
+
+	if pr.AuthorID == "" {
+		log.Error("author id is required")
+		return nil, nil, apperrors.ErrAuthorRequired
+	}
 
 	exists, err := s.prRepo.PRExists(pr.PullRequestId)
 	if err != nil {
 		log.Error("failed to check PR existence", sl.Err(err))
-		return nil, fmt.Errorf("%s: %w", op, err)
+		return nil, nil, fmt.Errorf("%s: %w", op, err)
 	}
+
 	if exists {
-		log.Warn("PR already exists")
-		return nil, fmt.Errorf("%s: PR already exists", op)
+		log.Warn("PR already exists", slog.String("pr_id", pr.PullRequestId))
+		return nil, nil, apperrors.ErrPRExists
 	}
 
 	teamName, err := s.prRepo.GetAuthorTeam(pr.AuthorID)
 	if err != nil {
+		if errors.Is(err, apperrors.ErrPRAuthorNotFound) {
+			log.Warn("author not found", slog.String("author_id", pr.AuthorID))
+			return nil, nil, apperrors.ErrPRAuthorNotFound
+		}
 		log.Error("failed to get author team", sl.Err(err))
-		return nil, fmt.Errorf("%s: author/team not found: %w", op, err)
+		return nil, nil, fmt.Errorf("%s: %w", op, err)
 	}
 
-	teamMembers, err := s.prRepo.GetTeamMembers(teamName)
+	teamMembers, err := s.prRepo.GetActiveTeamMembers(teamName, []string{pr.AuthorID})
 	if err != nil {
 		log.Error("failed to get team members", sl.Err(err))
-		return nil, fmt.Errorf("%s: failed to get team members: %w", op, err)
+		return nil, nil, fmt.Errorf("%s: %w", op, err)
 	}
 
-	var candidates []models.User
-	for _, member := range teamMembers {
-		if member.UserID != pr.AuthorID {
-			candidates = append(candidates, member)
-		}
+	if len(teamMembers) == 0 {
+		log.Warn("no active team members available for review")
+		return nil, nil, apperrors.ErrNoReviewerCandidates
 	}
 
-	if len(candidates) == 0 {
-		log.Error("no available reviewers in team")
-		return nil, fmt.Errorf("%s: no available reviewers in team", op)
-	}
-
-	reviewers := s.selectRandomReviewers(candidates, 2)
-	reviewerIDs := make([]string, len(reviewers))
-	for i, reviewer := range reviewers {
-		reviewerIDs[i] = reviewer.UserID
-	}
+	reviewers := s.selectRandomReviewers(teamMembers, 2)
 
 	pr.Status = "OPEN"
 	pr.CreatedAt = time.Now()
 
-	err = s.prRepo.CreatePullRequest(pr, reviewerIDs)
+	err = s.prRepo.CreatePR(pr)
 	if err != nil {
 		log.Error("failed to create PR", sl.Err(err))
-		return nil, fmt.Errorf("%s: %w", op, err)
+		return nil, nil, fmt.Errorf("%s: %w", op, err)
+	}
+
+	if len(reviewers) > 0 {
+		err = s.prRepo.AddPRReviewers(pr.PullRequestId, reviewers)
+		if err != nil {
+			log.Error("failed to add PR reviewers", sl.Err(err))
+			return nil, nil, fmt.Errorf("%s: %w", op, err)
+		}
+	}
+
+	createdPR, assignedReviewers, err := s.prRepo.GetPRWithReviewers(pr.PullRequestId)
+	if err != nil {
+		log.Error("failed to get created PR", sl.Err(err))
+		return nil, nil, fmt.Errorf("%s: %w", op, err)
 	}
 
 	log.Info("PR created successfully",
-		slog.Int("reviewer_count", len(reviewerIDs)),
-		slog.Any("reviewers", reviewerIDs))
+		slog.Int("reviewer_count", len(assignedReviewers)))
 
-	response := &CreatePullRequestResponse{
-		PR:                pr,
-		AssignedReviewers: reviewerIDs,
-	}
-
-	return response, nil
+	return createdPR, assignedReviewers, nil
 }
 
-func (s *PullRequestService) MergePullRequest(ctx context.Context, prID string) (*models.PullRequest, error) {
-	const op = "service.pullrequest.MergePullRequest"
+func (s *PullRequestService) MergePR(ctx context.Context, prID string) (*models.PullRequest, []string, error) {
+	const op = "service.pullRequest.MergePR"
 
 	log := s.log.With(
 		slog.String("op", op),
 		slog.String("pr_id", prID),
 	)
 
-	log.Info("attempting to merge pull request")
+	log.Info("attempting to merge PR")
 
 	if prID == "" {
-		log.Error("pull_request_id is required")
-		return nil, fmt.Errorf("%s: pull_request_id is required", op)
+		log.Error("pull request id is required")
+		return nil, nil, apperrors.ErrPRIDRequired
 	}
 
-	pr, err := s.prRepo.MergePullRequest(prID)
+	err := s.prRepo.MergePR(prID)
 	if err != nil {
-		log.Error("failed to merge PR", sl.Err(err))
-		if err.Error() == fmt.Sprintf("%s: PR not found", op) {
-			return nil, fmt.Errorf("%s: PR not found", op)
+		if errors.Is(err, apperrors.ErrPRNotFound) {
+			log.Warn("PR not found", slog.String("pr_id", prID))
+			return nil, nil, apperrors.ErrPRNotFound
 		}
-		return nil, fmt.Errorf("%s: %w", op, err)
+		log.Error("failed to merge PR", sl.Err(err))
+		return nil, nil, fmt.Errorf("%s: %w", op, err)
+	}
+
+	mergedPR, reviewers, err := s.prRepo.GetPRWithReviewers(prID)
+	if err != nil {
+		log.Error("failed to get merged PR", sl.Err(err))
+		return nil, nil, fmt.Errorf("%s: %w", op, err)
 	}
 
 	log.Info("PR merged successfully")
-	return pr, nil
+	return mergedPR, reviewers, nil
 }
 
-func (s *PullRequestService) ReassignReviewer(ctx context.Context, prID string, oldReviewerID string) (*ReassignReviewerResponse, error) {
+func (s *PullRequestService) ReassignReviewer(ctx context.Context, prID string, oldReviewerID string) (*models.PullRequest, []string, string, error) {
 	const op = "service.pullRequest.ReassignReviewer"
 
 	log := s.log.With(
@@ -158,134 +176,114 @@ func (s *PullRequestService) ReassignReviewer(ctx context.Context, prID string, 
 
 	log.Info("attempting to reassign reviewer")
 
-	// Валидация
 	if prID == "" {
-		log.Error("pull_request_id is required")
-		return nil, fmt.Errorf("%s: pull_request_id is required", op)
+		log.Error("pull request id is required")
+		return nil, nil, "", apperrors.ErrPRIDRequired
 	}
+
 	if oldReviewerID == "" {
-		log.Error("old_reviewer_id is required")
-		return nil, fmt.Errorf("%s: old_reviewer_id is required", op)
+		log.Error("old reviewer id is required")
+		return nil, nil, "", apperrors.ErrOldReviewerRequired
 	}
 
-	// Получаем информацию о PR
-	pr, err := s.prRepo.GetPullRequest(prID)
+	pr, reviewers, err := s.prRepo.GetPRWithReviewers(prID)
 	if err != nil {
+		if errors.Is(err, apperrors.ErrPRNotFound) {
+			log.Warn("PR not found", slog.String("pr_id", prID))
+			return nil, nil, "", apperrors.ErrPRNotFound
+		}
 		log.Error("failed to get PR", sl.Err(err))
-		return nil, fmt.Errorf("%s: PR not found", op)
+		return nil, nil, "", fmt.Errorf("%s: %w", op, err)
 	}
 
-	// Проверяем, что PR не мерджен
 	if pr.Status == "MERGED" {
-		log.Error("cannot reassign on merged PR")
-		return nil, fmt.Errorf("%s: cannot reassign on merged PR", op)
+		log.Warn("cannot reassign reviewer on merged PR", slog.String("pr_id", prID))
+		return nil, nil, "", apperrors.ErrPRAlreadyMerged
 	}
 
-	// Получаем текущих ревьюверов
-	currentReviewers, err := s.prRepo.GetAssignedReviewers(prID)
-	if err != nil {
-		log.Error("failed to get assigned reviewers", sl.Err(err))
-		return nil, fmt.Errorf("%s: %w", op, err)
-	}
-
-	// Проверяем, что старый ревьювер назначен на PR
-	found := false
-	for _, reviewer := range currentReviewers {
+	oldReviewerAssigned := false
+	for _, reviewer := range reviewers {
 		if reviewer == oldReviewerID {
-			found = true
+			oldReviewerAssigned = true
 			break
 		}
 	}
-	if !found {
-		log.Error("reviewer is not assigned to this PR")
-		return nil, fmt.Errorf("%s: reviewer is not assigned to this PR", op)
+
+	if !oldReviewerAssigned {
+		log.Warn("reviewer not assigned to this PR", slog.String("reviewer_id", oldReviewerID))
+		return nil, nil, "", apperrors.ErrReviewerNotAssigned
 	}
 
-	// Получаем команду автора
 	teamName, err := s.prRepo.GetAuthorTeam(pr.AuthorID)
 	if err != nil {
-		log.Error("failed to get author team", sl.Err(err))
-		return nil, fmt.Errorf("%s: failed to get author team: %w", op, err)
-	}
-
-	// Получаем активных членов команды
-	teamMembers, err := s.prRepo.GetTeamMembers(teamName)
-	if err != nil {
-		log.Error("failed to get team members", sl.Err(err))
-		return nil, fmt.Errorf("%s: failed to get team members: %w", op, err)
-	}
-
-	// Фильтруем доступных кандидатов (исключая автора, старого ревьювера и текущих ревьюверов)
-	var candidates []models.User
-	for _, member := range teamMembers {
-		if member.UserID != pr.AuthorID &&
-			member.UserID != oldReviewerID &&
-			!contains(currentReviewers, member.UserID) {
-			candidates = append(candidates, member)
+		if errors.Is(err, apperrors.ErrPRAuthorNotFound) {
+			log.Warn("author not found", slog.String("author_id", pr.AuthorID))
+			return nil, nil, "", apperrors.ErrPRAuthorNotFound
 		}
+		log.Error("failed to get author team", sl.Err(err))
+		return nil, nil, "", fmt.Errorf("%s: %w", op, err)
 	}
 
-	if len(candidates) == 0 {
-		log.Error("no active replacement candidate in team")
-		return nil, fmt.Errorf("%s: no active replacement candidate in team", op)
-	}
-
-	// Выбираем случайного кандидата
-	newReviewer := candidates[rand.Intn(len(candidates))]
-
-	// Выполняем переназначение
-	err = s.prRepo.ReassignReviewer(prID, oldReviewerID, newReviewer.UserID)
+	exclude := append(reviewers, pr.AuthorID)
+	availableMembers, err := s.prRepo.GetActiveTeamMembers(teamName, exclude)
 	if err != nil {
-		log.Error("failed to reassign reviewer", sl.Err(err))
-		return nil, fmt.Errorf("%s: %w", op, err)
+		log.Error("failed to get available team members", sl.Err(err))
+		return nil, nil, "", fmt.Errorf("%s: %w", op, err)
 	}
 
-	//updatedReviewers, err := s.prRepo.GetAssignedReviewers(prID)
-	//if err != nil {
-	//	log.Error("failed to get updated reviewers", sl.Err(err))
-	//	return nil, fmt.Errorf("%s: %w", op, err)
-	//}
+	if len(availableMembers) == 0 {
+		log.Warn("no available replacement candidates in team")
+		return nil, nil, "", apperrors.ErrNoReviewerCandidates
+	}
+
+	newReviewer := s.selectRandomReviewer(availableMembers)
+
+	err = s.prRepo.ReplaceReviewer(prID, oldReviewerID, newReviewer)
+	if err != nil {
+		log.Error("failed to replace reviewer", sl.Err(err))
+		return nil, nil, "", fmt.Errorf("%s: %w", op, err)
+	}
+
+	updatedPR, updatedReviewers, err := s.prRepo.GetPRWithReviewers(prID)
+	if err != nil {
+		log.Error("failed to get updated PR", sl.Err(err))
+		return nil, nil, "", fmt.Errorf("%s: %w", op, err)
+	}
 
 	log.Info("reviewer reassigned successfully",
-		slog.String("new_reviewer", newReviewer.UserID))
+		slog.String("new_reviewer", newReviewer))
 
-	response := &ReassignReviewerResponse{
-		PR:         *pr,
-		ReplacedBy: newReviewer.UserID,
-	}
-
-	return response, nil
+	return updatedPR, updatedReviewers, newReviewer, nil
 }
 
-func (s *PullRequestService) selectRandomReviewers(candidates []models.User, max int) []models.User {
-	if len(candidates) <= max {
-		shuffled := make([]models.User, len(candidates))
-		copy(shuffled, candidates)
-		rand.Shuffle(len(shuffled), func(i, j int) {
+func (s *PullRequestService) selectRandomReviewers(members []string, max int) []string {
+	if len(members) <= max {
+		shuffled := make([]string, len(members))
+		copy(shuffled, members)
+		rand.New(rand.NewSource(time.Now().UnixNano())).Shuffle(len(shuffled), func(i, j int) {
 			shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
 		})
 		return shuffled
 	}
 
-	selected := make([]models.User, 0, max)
-	used := make(map[int]bool)
+	selected := make([]string, max)
+	available := make([]string, len(members))
+	copy(available, members)
 
-	for len(selected) < max && len(selected) < len(candidates) {
-		idx := rand.Intn(len(candidates))
-		if !used[idx] {
-			selected = append(selected, candidates[idx])
-			used[idx] = true
-		}
-	}
+	rand.New(rand.NewSource(time.Now().UnixNano())).Shuffle(len(available), func(i, j int) {
+		available[i], available[j] = available[j], available[i]
+	})
 
+	copy(selected, available[:max])
 	return selected
 }
 
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
+func (s *PullRequestService) selectRandomReviewer(members []string) string {
+	if len(members) == 0 {
+		return ""
 	}
-	return false
+	rand.New(rand.NewSource(time.Now().UnixNano())).Shuffle(len(members), func(i, j int) {
+		members[i], members[j] = members[j], members[i]
+	})
+	return members[0]
 }

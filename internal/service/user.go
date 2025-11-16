@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"pull-request-assigner/internal/apperrors"
 	"pull-request-assigner/internal/domain/models"
 	"pull-request-assigner/internal/lib/logger/sl"
 	"strconv"
@@ -19,7 +21,7 @@ type UserProvider interface {
 	GetReview(userID int) ([]models.PullRequestShort, error)
 }
 
-func New(
+func NewUserService(
 	log *slog.Logger,
 	userProvider UserProvider) *UserService {
 	return &UserService{
@@ -42,12 +44,17 @@ func (s *UserService) SetUserActiveStatus(ctx context.Context, isActive bool, us
 	userIDInt, err := strconv.Atoi(userID[1:])
 	if err != nil {
 		log.Error("invalid user ID format", sl.Err(err))
-		return models.User{}, fmt.Errorf("%s: invalid user ID format: %w", op, err)
+		return models.User{}, apperrors.ErrInvalidUserID
 	}
 
 	user, err := s.userProvider.SetIsActive(isActive, userIDInt)
 	if err != nil {
 		log.Error("failed to set user active status", sl.Err(err))
+
+		if errors.Is(err, apperrors.ErrUserNotFound) {
+			return models.User{}, apperrors.ErrUserNotFound
+		}
+
 		return models.User{}, fmt.Errorf("%s: %w", op, err)
 	}
 
@@ -73,7 +80,7 @@ func (s *UserService) GetUserReview(ctx context.Context, userID string) ([]model
 	userIDInt, err := strconv.Atoi(userID[1:])
 	if err != nil {
 		log.Error("invalid user ID format", sl.Err(err))
-		return nil, fmt.Errorf("%s: invalid user ID format: %w", op, err)
+		return nil, apperrors.ErrInvalidUserID
 	}
 
 	prs, err := s.userProvider.GetReview(userIDInt)

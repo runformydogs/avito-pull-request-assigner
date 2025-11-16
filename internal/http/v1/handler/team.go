@@ -2,9 +2,11 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"pull-request-assigner/internal/apperrors"
 	"pull-request-assigner/internal/domain/models"
 	"pull-request-assigner/internal/lib/logger/sl"
 	"pull-request-assigner/internal/service"
@@ -17,11 +19,22 @@ type (
 	}
 
 	CreateTeamResponse struct {
-		Team models.Team `json:"team"`
+		TeamName string        `json:"team_name"`
+		Members  []models.User `json:"members"`
 	}
 
 	GetTeamResponse struct {
-		Team models.Team `json:"team"`
+		TeamName string        `json:"team_name"`
+		Members  []models.User `json:"members"`
+	}
+
+	TeamErrorResponse struct {
+		Error TeamErrorDetail `json:"error"`
+	}
+
+	TeamErrorDetail struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
 	}
 )
 
@@ -48,33 +61,31 @@ func (h *TeamHandler) CreateTeam(w http.ResponseWriter, r *http.Request) {
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Error("invalid request body", sl.Err(err))
-		h.writeError(w, http.StatusBadRequest, "invalid request body", err)
+		h.writeErrorResponse(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid request body")
 		return
 	}
 
 	if req.TeamName == "" {
 		log.Error("team_name is required")
-		h.writeError(w, http.StatusBadRequest, "team_name is required", nil)
+		h.writeErrorResponse(w, http.StatusBadRequest, "TEAM_NAME_REQUIRED", "team_name is required")
 		return
 	}
 
 	if len(req.Members) == 0 {
 		log.Error("team must have at least one member")
-		h.writeError(w, http.StatusBadRequest, "team must have at least one member", nil)
+		h.writeErrorResponse(w, http.StatusBadRequest, "MEMBERS_REQUIRED", "team must have at least one member")
 		return
 	}
 
 	for i, member := range req.Members {
 		if member.UserID == "" {
-			log.Error("user_id is required for all members", slog.Int("member_index", i))
-			h.writeError(w, http.StatusBadRequest,
-				fmt.Sprintf("user_id is required for member at index %d", i), nil)
+			h.writeErrorResponse(w, http.StatusBadRequest, "INVALID_MEMBER",
+				fmt.Sprintf("user_id is required for member at index %d", i))
 			return
 		}
 		if member.Username == "" {
-			log.Error("username is required for all members", slog.Int("member_index", i))
-			h.writeError(w, http.StatusBadRequest,
-				fmt.Sprintf("username is required for member at index %d", i), nil)
+			h.writeErrorResponse(w, http.StatusBadRequest, "INVALID_MEMBER",
+				fmt.Sprintf("username is required for member at index %d", i))
 			return
 		}
 	}
@@ -88,16 +99,23 @@ func (h *TeamHandler) CreateTeam(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Error("failed to create team", sl.Err(err))
 
-		if err.Error() == fmt.Sprintf("%s: team %s already exists", op, req.TeamName) {
-			h.writeError(w, http.StatusBadRequest, "team already exists", err)
-		} else {
-			h.writeError(w, http.StatusInternalServerError, "failed to create team", err)
+		switch {
+		case errors.Is(err, apperrors.ErrTeamExists):
+			h.writeErrorResponse(w, http.StatusBadRequest, "TEAM_EXISTS",
+				fmt.Sprintf("team %s already exists", req.TeamName))
+		case errors.Is(err, apperrors.ErrTeamNameRequired):
+			h.writeErrorResponse(w, http.StatusBadRequest, "TEAM_NAME_REQUIRED", "team_name is required")
+		case errors.Is(err, apperrors.ErrMembersRequired):
+			h.writeErrorResponse(w, http.StatusBadRequest, "MEMBERS_REQUIRED", "team must have at least one member")
+		default:
+			h.writeErrorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create team")
 		}
 		return
 	}
 
 	response := CreateTeamResponse{
-		Team: *createdTeam,
+		TeamName: createdTeam.TeamName,
+		Members:  createdTeam.Members,
 	}
 
 	h.writeJSON(w, http.StatusCreated, response)
@@ -114,7 +132,7 @@ func (h *TeamHandler) GetTeam(w http.ResponseWriter, r *http.Request) {
 	teamName := r.URL.Query().Get("team_name")
 	if teamName == "" {
 		log.Error("team_name is required")
-		h.writeError(w, http.StatusBadRequest, "team_name query parameter is required", nil)
+		h.writeErrorResponse(w, http.StatusBadRequest, "TEAM_NAME_REQUIRED", "team_name query parameter is required")
 		return
 	}
 
@@ -122,16 +140,20 @@ func (h *TeamHandler) GetTeam(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Error("failed to get team", sl.Err(err))
 
-		if err.Error() == fmt.Sprintf("%s: team not found", op) {
-			h.writeError(w, http.StatusNotFound, "team not found", err)
-		} else {
-			h.writeError(w, http.StatusInternalServerError, "failed to get team", err)
+		switch {
+		case errors.Is(err, apperrors.ErrTeamNotFound):
+			h.writeErrorResponse(w, http.StatusNotFound, "NOT_FOUND", "resource not found")
+		case errors.Is(err, apperrors.ErrTeamNameRequired):
+			h.writeErrorResponse(w, http.StatusBadRequest, "TEAM_NAME_REQUIRED", "team_name is required")
+		default:
+			h.writeErrorResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to get team")
 		}
 		return
 	}
 
 	response := GetTeamResponse{
-		Team: *team,
+		TeamName: team.TeamName,
+		Members:  team.Members,
 	}
 
 	h.writeJSON(w, http.StatusOK, response)
@@ -142,22 +164,22 @@ func (h *TeamHandler) writeJSON(w http.ResponseWriter, status int, data interfac
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		fmt.Printf("Error encoding JSON response: %v\n", err)
+		h.log.Error("failed to encode JSON response", sl.Err(err))
 	}
 }
 
-func (h *TeamHandler) writeError(w http.ResponseWriter, status int, message string, err error) {
+func (h *TeamHandler) writeErrorResponse(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 
-	errorResp := ErrorResponse{
-		Error: message,
-	}
-	if err != nil {
-		errorResp.Details = err.Error()
+	errorResp := TeamErrorResponse{
+		Error: TeamErrorDetail{
+			Code:    code,
+			Message: message,
+		},
 	}
 
 	if err := json.NewEncoder(w).Encode(errorResp); err != nil {
-		fmt.Printf("Error encoding error response: %v\n", err)
+		h.log.Error("failed to encode error response", sl.Err(err))
 	}
 }

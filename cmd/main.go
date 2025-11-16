@@ -3,6 +3,8 @@ package main
 import (
 	"log/slog"
 	"os"
+	"os/signal"
+	"pull-request-assigner/internal/app"
 	"pull-request-assigner/internal/config"
 )
 
@@ -16,10 +18,24 @@ func main() {
 	cfg := config.MustLoad()
 
 	log := setupLogger(cfg.Env)
+
 	log = log.With(slog.String("env", cfg.Env))
 
 	log.Info("initializing server", slog.String("address", cfg.Server.Port))
 	log.Debug("logger debug mode enabled")
+
+	application := app.MustNew(log)
+
+	go application.MustRun()
+
+	stop := make(chan os.Signal, 1)
+
+	signal.Notify(stop, os.Interrupt)
+
+	<-stop
+
+	application.GracefulShutdown()
+	log.Info("Application stopped")
 }
 
 func setupLogger(env string) *slog.Logger {

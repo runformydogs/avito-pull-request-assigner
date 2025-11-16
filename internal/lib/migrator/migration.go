@@ -19,7 +19,7 @@ var fs embed.FS
 func RunMigrations(cfg config.PostgresConfig, log *slog.Logger) error {
 	const op = "migrator.RunMigrations"
 
-	connStr := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.DbName, cfg.SslMode)
 
 	migrationDB, err := sqlx.Connect("postgres", connStr)

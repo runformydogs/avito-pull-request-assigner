@@ -3,7 +3,9 @@ package repo
 import (
 	"fmt"
 	"github.com/jmoiron/sqlx"
+	"pull-request-assigner/internal/apperrors"
 	"pull-request-assigner/internal/domain/models"
+	"strconv"
 )
 
 type TeamRepo struct {
@@ -21,6 +23,9 @@ func (r *TeamRepo) CreateTeam(teamName string) error {
 
 	_, err := r.storage.Exec(query, teamName)
 	if err != nil {
+		if isDuplicateKeyError(err) {
+			return fmt.Errorf("%s: %w", op, apperrors.ErrTeamExists)
+		}
 		return fmt.Errorf("%s: %w", op, err)
 	}
 
@@ -64,7 +69,7 @@ func (r *TeamRepo) AddTeamMembers(teamName string, members []models.User) error 
 		var userIDInt int
 		_, err := fmt.Sscanf(member.UserID, "u%d", &userIDInt)
 		if err != nil {
-			return fmt.Errorf("%s: invalid user_id format %s: %w", op, member.UserID, err)
+			return fmt.Errorf("%s: %w", op, apperrors.ErrInvalidUserID)
 		}
 
 		_, err = tx.Exec(userQuery, userIDInt, member.Username, teamName, member.IsActive)
@@ -79,7 +84,7 @@ func (r *TeamRepo) AddTeamMembers(teamName string, members []models.User) error 
 		var userIDInt int
 		_, err := fmt.Sscanf(member.UserID, "u%d", &userIDInt)
 		if err != nil {
-			return fmt.Errorf("%s: invalid user_id format %s: %w", op, member.UserID, err)
+			return fmt.Errorf("%s: %w", op, apperrors.ErrInvalidUserID)
 		}
 
 		_, err = tx.Exec(memberQuery, teamName, userIDInt)
@@ -103,7 +108,7 @@ func (r *TeamRepo) GetTeamWithMembers(teamName string) (*models.Team, error) {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	if !exists {
-		return nil, fmt.Errorf("%s: team not found", op)
+		return nil, fmt.Errorf("%s: %w", op, apperrors.ErrTeamNotFound)
 	}
 
 	query := `
@@ -124,7 +129,8 @@ func (r *TeamRepo) GetTeamWithMembers(teamName string) (*models.Team, error) {
 	}
 
 	for i := range members {
-		members[i].UserID = fmt.Sprintf("u%d", members[i].UserID)
+		id, _ := strconv.Atoi(members[i].UserID)
+		members[i].UserID = fmt.Sprintf("u%d", id)
 	}
 
 	team := &models.Team{
@@ -133,4 +139,11 @@ func (r *TeamRepo) GetTeamWithMembers(teamName string) (*models.Team, error) {
 	}
 
 	return team, nil
+}
+
+func isDuplicateKeyError(err error) bool {
+	if err.Error() == "pq: duplicate key value violates unique constraint" {
+		return true
+	}
+	return false
 }

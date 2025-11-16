@@ -19,8 +19,8 @@ func NewPullRequestRouter(pullRequestService *service.PullRequestService, log *s
 func (prr *PullRequestRouter) SetupRoutes(r chi.Router) {
 
 	r.Route("/pullRequest", func(r chi.Router) {
-		r.Post("/create", prr.handler.CreatePullRequest)
-		r.Post("/merge", prr.handler.MergePullRequest)
+		r.Post("/create", prr.handler.CreatePR)
+		r.Post("/merge", prr.handler.MergePR)
 		r.Post("/reassign", prr.handler.ReassignReviewer)
 	})
 

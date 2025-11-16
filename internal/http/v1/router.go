@@ -15,14 +15,13 @@ type RouterDependencies struct {
 	TeamService        *service.TeamService
 	UserService        *service.UserService
 	PullRequestService *service.PullRequestService
-	Log                *slog.Logger
 }
 
-func SetupRoutes(r chi.Router, deps *RouterDependencies) {
+func SetupRoutes(r chi.Router, deps *RouterDependencies, log *slog.Logger) {
 	routers := []Router{
-		router2.NewTeamRouter(deps.TeamService, deps.Log),
-		router2.NewUserRouter(deps.UserService, deps.Log),
-		router2.NewPullRequestRouter(deps.PullRequestService, deps.Log),
+		router2.NewTeamRouter(deps.TeamService, log),
+		router2.NewUserRouter(deps.UserService, log),
+		router2.NewPullRequestRouter(deps.PullRequestService, log),
 	}
 
 	for _, serviceRouter := range routers {

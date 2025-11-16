@@ -21,7 +21,7 @@ func New(
 ) *App {
 	r := chi.NewRouter()
 
-	v1.SetupRoutes(r, deps)
+	v1.SetupRoutes(r, deps, log)
 
 	httpServer := &http.Server{
 		Addr:    ":" + port,

@@ -3,6 +3,7 @@ package postgresql
 import (
 	"fmt"
 	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 	"log"
 	"pull-request-assigner/internal/config"
 	"runtime/debug"
@@ -15,7 +16,7 @@ type Storage struct {
 func Init(cfg config.PostgresConfig) *Storage {
 	const op = "storage.postgresql.Init"
 
-	connStr := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.DbName, cfg.SslMode)
 
 	db, err := sqlx.Connect("postgres", connStr)
